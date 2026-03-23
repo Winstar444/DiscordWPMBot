@@ -1,0 +1,32 @@
+{
+  "name": "discordwpmbot",
+  "version": "1.0.0",
+  "description": "True AI assistant",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/externalPointerVariable/DiscordWPMBot.git"
+  },
+  "keywords": [
+    "AI",
+    "Task",
+    "Executer"
+  ],
+  "author": "externalPointerVariable",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/externalPointerVariable/DiscordWPMBot/issues"
+  },
+  "homepage": "https://github.com/externalPointerVariable/DiscordWPMBot#readme",
+  "dependencies": {
+    "discord.js": "^13.17.1",
+    "express": "^5.2.1",
+    "mongoose": "^9.3.1",
+    "n8n": "^2.8.4"
+  }
+}
