@@ -1,9 +1,21 @@
 import discord from 'discord.js';
 const { Client, GatewayIntentBits } = discord;
+
 import dotenv from 'dotenv';
+import fetch from 'node-fetch';
+
 import { parseTask } from './taskParser.js';
-import { sendScheduleConfirmation, sendErrorMessage, sendHelpMessage } from './discordNotify.js';
-import { getScheduledTasks, cancelTask } from './scheduler.js';
+import {
+  sendScheduleConfirmation,
+  sendErrorMessage,
+  sendHelpMessage
+} from './discordNotify.js';
+
+import {
+  getScheduledTasks,
+  cancelTask,
+  getQueueStatus   // ✅ added
+} from './scheduler.js';
 
 dotenv.config();
 
@@ -28,16 +40,70 @@ client.once('ready', () => {
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
-  const content = message.content.trim();
+  const content = message.content.trim().toLowerCase();
 
-  // ─── !help command ────────────────────────────────
-  if (content.toLowerCase() === '!help') {
+  // ─── !help ───────────────────────────────────────
+  if (content === '!help') {
     await sendHelpMessage(message.channel);
     return;
   }
 
-  // ─── !list command ────────────────────────────────
-  if (content.toLowerCase() === '!list') {
+  // ─── !queue (GLOBAL QUEUE VIEW) ──────────────────
+  if (content === '!queue') {
+    const { total, running, waiting, tasks } = getQueueStatus();
+
+    if (total === 0) {
+      await message.channel.send({
+        embeds: [{
+          title: '📋 Queue Empty',
+          description: 'No tasks in queue right now.',
+          color: 0x5865F2,
+          footer: { text: 'StudyBot AI' }
+        }]
+      });
+      return;
+    }
+
+    const taskList = tasks
+      .slice(0, 10) // ⚠️ prevent overflow
+      .map((t, i) => {
+        const time = new Date(t.scheduledTime).toLocaleString('en-IN', {
+          timeZone: 'Asia/Kolkata',
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: true
+        });
+
+        const emoji =
+          t.status === 'running' ? '🔄' :
+          t.status === 'completed' ? '✅' : '⏳';
+
+        const shortTask =
+          t.task.length > 50 ? t.task.substring(0, 50) + '...' : t.task;
+
+        return `${emoji} **${i + 1}.** ${t.taskType.toUpperCase()} — ${time}\n👤 ${t.username} — ${shortTask}`;
+      })
+      .join('\n\n');
+
+    await message.channel.send({
+      embeds: [{
+        title: '📋 Task Queue',
+        description: taskList,
+        color: 0x5865F2,
+        fields: [
+          { name: '📊 Total', value: `${total}`, inline: true },
+          { name: '🔄 Running', value: `${running}`, inline: true },
+          { name: '⏳ Waiting', value: `${waiting}`, inline: true },
+        ],
+        footer: { text: 'StudyBot AI • Tasks sorted by scheduled time' }
+      }]
+    });
+
+    return;
+  }
+
+  // ─── !list ───────────────────────────────────────
+  if (content === '!list') {
     const tasks = getScheduledTasks(message.author.id);
 
     if (tasks.length === 0) {
@@ -66,8 +132,8 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
-  // ─── !cancel command ──────────────────────────────
-  if (content.toLowerCase().startsWith('!cancel')) {
+  // ─── !cancel ─────────────────────────────────────
+  if (content.startsWith('!cancel')) {
     const taskId = content.split(' ')[1];
 
     if (!taskId) {
@@ -100,9 +166,9 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
-  // ─── !task command ────────────────────────────────
-  if (content.toLowerCase().startsWith('!task')) {
-    const parsed = parseTask(content);
+  // ─── !task ───────────────────────────────────────
+  if (content.startsWith('!task')) {
+    const parsed = parseTask(message.content); // ⚠️ original content, not lowercase
 
     if (!parsed.success) {
       await sendErrorMessage(message.channel, message.author.id, parsed.error);
@@ -110,7 +176,9 @@ client.on('messageCreate', async (message) => {
     }
 
     try {
-      const SERVER_URL = process.env.SERVER_URL || `http://localhost:${process.env.PORT || 3000}`;
+      const SERVER_URL =
+        process.env.SERVER_URL ||
+        `http://localhost:${process.env.PORT || 3000}`;
 
       const response = await fetch(`${SERVER_URL}/schedule-task`, {
         method: 'POST',
@@ -130,7 +198,6 @@ client.on('messageCreate', async (message) => {
       }
 
       const data = await response.json();
-      console.log(`📅 Response from server:`, data);
 
       if (data.success) {
         await sendScheduleConfirmation(
@@ -156,6 +223,7 @@ client.on('messageCreate', async (message) => {
         'Server error. Make sure the bot is running.'
       );
     }
+
     return;
   }
 });

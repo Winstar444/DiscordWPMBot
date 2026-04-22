@@ -3,10 +3,124 @@ dotenv.config();
 
 console.log('🔑 Groq Key loaded:', process.env.GROQ_API_KEY ? 'YES' : 'NO - MISSING!');
 
-// Store scheduled tasks in memory
-const scheduledTasks = new Map();
+// ─── Priority Queue System ────────────────────────────
+class TaskQueue {
+  constructor() {
+    this.tasks = new Map();      // all tasks
+    this.timeouts = new Map();   // setTimeout references
+    this.running = new Set();    // currently running tasks
+    this.maxConcurrent = 3;      // max tasks running at same time
+  }
 
-// Main function — schedule a task
+  // Add task to queue
+  add(taskData) {
+    const { taskId, scheduledTime } = taskData;
+    this.tasks.set(taskId, {
+      ...taskData,
+      status: 'waiting',
+      createdAt: new Date().toISOString()
+    });
+
+    // Sort queue by scheduled time
+    this._sortQueue();
+
+    console.log(`📋 Queue status: ${this.tasks.size} task(s) in queue`);
+    this._printQueue();
+
+    return taskId;
+  }
+
+  // Remove task from queue
+  remove(taskId) {
+    if (this.timeouts.has(taskId)) {
+      clearTimeout(this.timeouts.get(taskId));
+      this.timeouts.delete(taskId);
+    }
+    this.tasks.delete(taskId);
+    this.running.delete(taskId);
+    console.log(`🗑️ Task ${taskId} removed from queue`);
+  }
+
+  // Update task status
+  updateStatus(taskId, status) {
+    if (this.tasks.has(taskId)) {
+      const task = this.tasks.get(taskId);
+      task.status = status;
+      this.tasks.set(taskId, task);
+      console.log(`📊 Task ${taskId} status: ${status}`);
+    }
+  }
+
+  // Get tasks for a user
+  getUserTasks(userId) {
+    const userTasks = [];
+    for (const [id, task] of this.tasks) {
+      if (task.userId === userId) {
+        userTasks.push(task);
+      }
+    }
+    // Sort by scheduled time
+    return userTasks.sort((a, b) =>
+      new Date(a.scheduledTime) - new Date(b.scheduledTime)
+    );
+  }
+
+  // Get all tasks sorted by time
+  getAllSorted() {
+    return Array.from(this.tasks.values()).sort((a, b) =>
+      new Date(a.scheduledTime) - new Date(b.scheduledTime)
+    );
+  }
+
+  // Check if task can run (concurrent limit)
+  canRun() {
+    return this.running.size < this.maxConcurrent;
+  }
+
+  // Mark task as running
+  markRunning(taskId) {
+    this.running.add(taskId);
+    this.updateStatus(taskId, 'running');
+  }
+
+  // Mark task as done
+  markDone(taskId) {
+    this.running.delete(taskId);
+    this.updateStatus(taskId, 'completed');
+  }
+
+  // Sort queue by scheduled time
+  _sortQueue() {
+    const sorted = Array.from(this.tasks.entries()).sort(([, a], [, b]) =>
+      new Date(a.scheduledTime) - new Date(b.scheduledTime)
+    );
+    this.tasks.clear();
+    for (const [id, task] of sorted) {
+      this.tasks.set(id, task);
+    }
+  }
+
+  // Print queue to console
+  _printQueue() {
+    const sorted = this.getAllSorted();
+    if (sorted.length === 0) return;
+    console.log('📋 Current Queue (sorted by time):');
+    sorted.forEach((t, i) => {
+      const time = new Date(t.scheduledTime).toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true
+      });
+      console.log(`   ${i + 1}. [${t.status.toUpperCase()}] ${t.taskType} — ${time} — ${t.username}`);
+    });
+  }
+}
+
+// Global queue instance
+const queue = new TaskQueue();
+
+// ─── Main function — schedule a task ─────────────────
 export async function scheduleTask({ userId, channelId, username, task, taskType, scheduledTime }, discordClient) {
 
   const scheduledDate = new Date(scheduledTime);
@@ -18,34 +132,52 @@ export async function scheduleTask({ userId, channelId, username, task, taskType
     return { success: false, error: 'Scheduled time is in the past' };
   }
 
-  console.log(`📅 Task scheduled for ${username} — runs in ${Math.round(delay / 1000 / 60)} minutes`);
-
   // Generate task ID
   const taskId = `${userId}-${Date.now()}`;
 
-  // Schedule with setTimeout
-  const timeout = setTimeout(async () => {
-    await executeTask({ userId, channelId, username, task, taskType }, discordClient);
-    scheduledTasks.delete(taskId);
-  }, delay);
-
-  // Save to memory
-  scheduledTasks.set(taskId, {
+  // Add to queue
+  queue.add({
     taskId,
     userId,
     channelId,
     username,
     task,
     taskType,
-    scheduledTime,
-    timeout
+    scheduledTime
   });
+
+  console.log(`📅 Task scheduled for ${username} — runs in ${Math.round(delay / 1000 / 60)} minutes`);
+
+  // Schedule with setTimeout
+  const timeout = setTimeout(async () => {
+    await executeTask(taskId, discordClient);
+  }, delay);
+
+  queue.timeouts.set(taskId, timeout);
 
   return { success: true, taskId };
 }
 
-// Execute task when time comes
-async function executeTask({ userId, channelId, username, task, taskType }, discordClient) {
+// ─── Execute task when time comes ────────────────────
+async function executeTask(taskId, discordClient) {
+  const taskData = queue.tasks.get(taskId);
+  if (!taskData) {
+    console.log(`⚠️ Task ${taskId} not found in queue`);
+    return;
+  }
+
+  const { userId, channelId, username, task, taskType } = taskData;
+
+  // Check concurrent limit
+  if (!queue.canRun()) {
+    console.log(`⏳ Concurrent limit reached. Waiting 30 seconds...`);
+    const timeout = setTimeout(() => executeTask(taskId, discordClient), 30000);
+    queue.timeouts.set(taskId, timeout);
+    return;
+  }
+
+  // Mark as running
+  queue.markRunning(taskId);
   console.log(`🤖 Executing task for ${username}: ${task}`);
 
   try {
@@ -53,19 +185,24 @@ async function executeTask({ userId, channelId, username, task, taskType }, disc
     const result = await callGroq(systemPrompt, task);
 
     if (!result) {
+      queue.updateStatus(taskId, 'failed');
       await notifyError(discordClient, channelId, userId, username, taskType);
-      return;
+    } else {
+      queue.markDone(taskId);
+      await notifySuccess(discordClient, channelId, userId, username, task, taskType, result);
     }
-
-    await notifySuccess(discordClient, channelId, userId, username, task, taskType, result);
 
   } catch (error) {
     console.error('❌ Task execution error:', error);
+    queue.updateStatus(taskId, 'failed');
     await notifyError(discordClient, channelId, userId, username, taskType);
+  } finally {
+    // Remove from queue after completion
+    setTimeout(() => queue.remove(taskId), 5000);
   }
 }
 
-// Call Groq API with retry logic
+// ─── Call Groq API with retry ─────────────────────────
 async function callGroq(systemPrompt, task, retries = 3) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -88,7 +225,6 @@ async function callGroq(systemPrompt, task, retries = 3) {
         })
       });
 
-      // Rate limit — wait and retry
       if (response.status === 429) {
         const waitTime = (i + 1) * 10000;
         console.log(`⏳ Rate limited. Waiting ${waitTime / 1000} seconds...`);
@@ -99,7 +235,7 @@ async function callGroq(systemPrompt, task, retries = 3) {
       if (!response.ok) {
         const errorBody = await response.text();
         console.error('❌ Groq error body:', errorBody);
-        throw new Error(`Groq error: ${response.status} - ${errorBody}`);
+        throw new Error(`Groq error: ${response.status}`);
       }
 
       const data = await response.json();
@@ -112,14 +248,13 @@ async function callGroq(systemPrompt, task, retries = 3) {
         console.error('❌ All retries failed');
         return null;
       }
-      console.log(`⏳ Waiting 5 seconds before retry...`);
       await new Promise(resolve => setTimeout(resolve, 5000));
     }
   }
   return null;
 }
 
-// Send success notification to Discord
+// ─── Discord Notifications ────────────────────────────
 async function notifySuccess(discordClient, channelId, userId, username, task, taskType, result) {
   try {
     const channel = await discordClient.channels.fetch(channelId);
@@ -135,7 +270,6 @@ async function notifySuccess(discordClient, channelId, userId, username, task, t
       }]
     });
 
-    // DM user
     try {
       const user = await discordClient.users.fetch(userId);
       await user.send({
@@ -158,7 +292,6 @@ async function notifySuccess(discordClient, channelId, userId, username, task, t
   }
 }
 
-// Send error notification to Discord
 async function notifyError(discordClient, channelId, userId, username, taskType) {
   try {
     const channel = await discordClient.channels.fetch(channelId);
@@ -176,7 +309,7 @@ async function notifyError(discordClient, channelId, userId, username, taskType)
   }
 }
 
-// Get prompt for task type
+// ─── Prompts ──────────────────────────────────────────
 function getPrompt(taskType) {
   const prompts = {
     quiz:       'Generate 10 MCQs with 4 options each and mark correct answer for this topic:',
@@ -194,29 +327,24 @@ function getPrompt(taskType) {
   return prompts[taskType] || 'Answer this question in detail:';
 }
 
-// Get all scheduled tasks
+// ─── Exports ──────────────────────────────────────────
 export function getScheduledTasks(userId) {
-  const tasks = [];
-  for (const [id, task] of scheduledTasks) {
-    if (task.userId === userId) {
-      tasks.push({
-        taskId: id,
-        task: task.task,
-        taskType: task.taskType,
-        scheduledTime: task.scheduledTime
-      });
-    }
-  }
-  return tasks;
+  return queue.getUserTasks(userId);
 }
 
-// Cancel a scheduled task
 export function cancelTask(taskId) {
-  const task = scheduledTasks.get(taskId);
-  if (task) {
-    clearTimeout(task.timeout);
-    scheduledTasks.delete(taskId);
+  if (queue.tasks.has(taskId)) {
+    queue.remove(taskId);
     return true;
   }
   return false;
+}
+
+export function getQueueStatus() {
+  return {
+    total: queue.tasks.size,
+    running: queue.running.size,
+    waiting: queue.tasks.size - queue.running.size,
+    tasks: queue.getAllSorted()
+  };
 }
